@@ -169,7 +169,15 @@ class CN_AE(nn.Module):
         self.n_filt = n_filt
         self.half_filt = n_filt // 2
         self.qrt_filt = n_filt // 4
-        self.featureDim = (n_filt * num_chan // 8) * (num_samp // 8)
+        # NOTE: parentheses matter. `n_filt * num_chan // 8` evaluates as
+        # `(n_filt * num_chan) // 8`, which only matches the true post-encoder
+        # shape when num_chan is a multiple of 8. The three MaxPool2d(k=2)
+        # layers below each floor-divide the channel dim independently, so the
+        # actual flattened-feature count is n_filt * (num_chan // 8) *
+        # (num_samp // 8). With num_chan=266 the un-parenthesized form
+        # over-counted by 320 per sample and produced an "invalid shape" at
+        # `x.view(-1, self.featureDim)` in encode().
+        self.featureDim = n_filt * (num_chan // 8) * (num_samp // 8)
 
         self.encoder_conv = nn.Sequential()
 
