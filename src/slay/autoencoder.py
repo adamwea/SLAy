@@ -52,17 +52,6 @@ def generate_train_data(
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Clamp num_chan to the number of channels actually on the probe.
-    # find_best_channels -> get_closest_channels silently clamps its returned
-    # channel list to channel_pos.shape[0] via a Python slice, but the spikes
-    # buffer below is preallocated with the un-clamped value. If the caller
-    # requested ae_chan > n_channels, the per-spike write at the bottom of
-    # this function tries to put (1, n_channels, T) into (1, ae_chan, T) and
-    # raises a broadcast RuntimeError.
-    n_channels_on_probe = int(channel_pos.shape[0])
-    if int(ext_params["num_chan"]) > n_channels_on_probe:
-        ext_params["num_chan"] = n_channels_on_probe
-
     # Pre-compute the set of closest channels for each channel.
     chans = {}
     for id in ci["good_ids"]:
@@ -331,7 +320,12 @@ def train_ae(
     net = (
         model
         if model
-        else CN_AE(zDim=zDim, n_filt=n_filt, num_samp=spikes.shape[-1]).to(device)
+        else CN_AE(
+            zDim=zDim,
+            n_filt=n_filt,
+            num_chan=spikes.shape[-2],
+            num_samp=spikes.shape[-1],
+        ).to(device)
     )
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
 

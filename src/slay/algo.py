@@ -38,6 +38,17 @@ def run_merge(params: dict[str, Any]) -> tuple[str, str, str, str, str, int, int
         os.path.join(params["KS_folder"], "channel_positions.npy")
     )
 
+    # Clamp ae_chan to the number of channels actually on the probe. The
+    # autoencoder spike-snippet allocator preallocates (n_snip, 1, ae_chan, T)
+    # and the per-unit channel selector silently slices its returned channel
+    # list to channel_pos.shape[0]. When ae_chan > n_channels these disagree
+    # and `generate_train_data` raises a broadcast RuntimeError; downstream,
+    # `train_ae` would also build CN_AE with the wrong num_chan. Clamping at
+    # the source keeps every consumer of params["ae_chan"] consistent.
+    n_channels_on_probe = int(channel_pos.shape[0])
+    if int(params["ae_chan"]) > n_channels_on_probe:
+        params["ae_chan"] = n_channels_on_probe
+
     if "label" not in cl_labels.columns:
         try:
             cl_labels["label"] = cl_labels["KSLabel"]
@@ -119,7 +130,10 @@ def run_merge(params: dict[str, Any]) -> tuple[str, str, str, str, str, int, int
         tqdm.write(f"Autoencoder saved in {model_path}")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        net = CN_AE().to(device)
+        net = CN_AE(
+            num_chan=int(params["ae_chan"]),
+            num_samp=int(params["ae_pre"]) + int(params["ae_post"]),
+        ).to(device)
         net.load_state_dict(torch.load(model_path, weights_only=True))
         net.eval()
         spk_data = SpikeDataset(spk_snips, cl_ids)
