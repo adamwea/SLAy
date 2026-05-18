@@ -524,6 +524,84 @@ def accept_all_merges(vals, params) -> None:
             spike_template_features,
         )
 
+    # Sync auxiliary cluster_*.tsv files (cluster_KSLabel.tsv, cluster_Amplitude.tsv,
+    # cluster_ContamPct.tsv) so they include rows for every new merged cluster_id.
+    # Without this, SI's read_kilosort inner-joins all cluster_*.tsv on cluster_id
+    # and silently drops the new merged units that SLAy added to cluster_group.tsv
+    # but not to the per-metric TSVs — recon then sees pre-merge survivors only,
+    # not the full post-merge unit roster. For each new merged cluster_id, we fill
+    # the KSLabel from cluster_group's `label` column (SLAy's inherited mode-of-input
+    # label) and copy Amplitude / ContamPct from the first parent old_id in `merges`
+    # so the metric scale stays reasonable. Existing rows are left untouched.
+    _sync_auxiliary_cluster_tsvs(
+        ks_folder=params["KS_folder"],
+        merges=merges,
+        cl_labels=cl_labels,
+    )
+
+
+def _sync_auxiliary_cluster_tsvs(
+    *,
+    ks_folder: str,
+    merges: dict,
+    cl_labels,
+) -> None:
+    """Add stub rows for new merged cluster_ids to cluster_KSLabel.tsv,
+    cluster_Amplitude.tsv, and cluster_ContamPct.tsv so SI's read_kilosort
+    doesn't drop them on its inner-join across cluster_*.tsv files.
+    """
+    import pandas as pd
+
+    aux_specs = [
+        ("cluster_KSLabel.tsv", "KSLabel", None),     # KSLabel filled from cl_labels.label
+        ("cluster_Amplitude.tsv", "Amplitude", None),  # numeric: copy from first parent
+        ("cluster_ContamPct.tsv", "ContamPct", None),  # numeric: copy from first parent
+    ]
+    for filename, value_col, _ in aux_specs:
+        path = os.path.join(ks_folder, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, sep="\t")
+        except Exception as exc:
+            tqdm.write(f"SLAy _sync_auxiliary_cluster_tsvs: failed to read {path}: {exc!r}")
+            continue
+        if "cluster_id" not in df.columns or value_col not in df.columns:
+            continue
+        existing_ids = set(df["cluster_id"].tolist())
+        new_rows = []
+        for new_id_str, old_ids in merges.items():
+            new_id = int(new_id_str)
+            if new_id in existing_ids:
+                continue
+            if value_col == "KSLabel":
+                try:
+                    label_val = cl_labels.loc[new_id, "label"]
+                except Exception:
+                    label_val = ""
+                new_rows.append({"cluster_id": new_id, value_col: label_val})
+            else:
+                # numeric metric: copy from first parent old_id whose value we can find
+                parent_val = float("nan")
+                for old in old_ids:
+                    try:
+                        old_int = int(old)
+                    except Exception:
+                        continue
+                    match = df.loc[df["cluster_id"] == old_int, value_col]
+                    if len(match) > 0:
+                        parent_val = float(match.iloc[0])
+                        break
+                new_rows.append({"cluster_id": new_id, value_col: parent_val})
+        if not new_rows:
+            continue
+        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        df = df.sort_values("cluster_id").reset_index(drop=True)
+        df.to_csv(path, sep="\t", index=False)
+        tqdm.write(
+            f"SLAy _sync_auxiliary_cluster_tsvs: added {len(new_rows)} stub rows to {filename}"
+        )
+
 
 def accept_merge(
     cl_labels,
