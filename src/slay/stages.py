@@ -648,7 +648,21 @@ def remove_duplicate_spikes(
         duplicate_idxs = np.where(np.isin(spike_times, duplicate_times))[0]
         duplicate_idxs = np.intersect1d(cluster_idxs, duplicate_idxs)
 
-        assert len(duplicate_idxs) == len(duplicate_times)
+        # duplicate_times is sorted-unique (from np.intersect1d). duplicate_idxs
+        # is the multiset of spike-table rows matching those values within this
+        # cluster: if the same sample index appears in spike_times more than
+        # once for this cluster (real in large wells with template overlap,
+        # or KS double-counting a tied alignment), one unique duplicate time
+        # legitimately maps to >1 spike rows that we want to delete. The old
+        # strict-equality assertion fired on every such case (>720-unit M06804
+        # wells reliably trip it). Only the < direction is a real inconsistency:
+        # a unique duplicate time we cannot locate in the spike table.
+        assert len(duplicate_idxs) >= len(duplicate_times), (
+            f"remove_duplicate_spikes: missing spike-table rows for duplicate "
+            f"times in cluster {old_id} "
+            f"(found {len(duplicate_idxs)} rows for "
+            f"{len(duplicate_times)} unique duplicate times)"
+        )
         # for each duplicate spike, remove associated spikes from KS files
         spike_times = np.delete(spike_times, duplicate_idxs)
         spike_clusters = np.delete(spike_clusters, duplicate_idxs)
