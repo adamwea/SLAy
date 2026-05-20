@@ -524,6 +524,84 @@ def accept_all_merges(vals, params) -> None:
             spike_template_features,
         )
 
+    # Sync auxiliary cluster_*.tsv files (cluster_KSLabel.tsv, cluster_Amplitude.tsv,
+    # cluster_ContamPct.tsv) so they include rows for every new merged cluster_id.
+    # Without this, SI's read_kilosort inner-joins all cluster_*.tsv on cluster_id
+    # and silently drops the new merged units that SLAy added to cluster_group.tsv
+    # but not to the per-metric TSVs — recon then sees pre-merge survivors only,
+    # not the full post-merge unit roster. For each new merged cluster_id, we fill
+    # the KSLabel from cluster_group's `label` column (SLAy's inherited mode-of-input
+    # label) and copy Amplitude / ContamPct from the first parent old_id in `merges`
+    # so the metric scale stays reasonable. Existing rows are left untouched.
+    _sync_auxiliary_cluster_tsvs(
+        ks_folder=params["KS_folder"],
+        merges=merges,
+        cl_labels=cl_labels,
+    )
+
+
+def _sync_auxiliary_cluster_tsvs(
+    *,
+    ks_folder: str,
+    merges: dict,
+    cl_labels,
+) -> None:
+    """Add stub rows for new merged cluster_ids to cluster_KSLabel.tsv,
+    cluster_Amplitude.tsv, and cluster_ContamPct.tsv so SI's read_kilosort
+    doesn't drop them on its inner-join across cluster_*.tsv files.
+    """
+    import pandas as pd
+
+    aux_specs = [
+        ("cluster_KSLabel.tsv", "KSLabel", None),     # KSLabel filled from cl_labels.label
+        ("cluster_Amplitude.tsv", "Amplitude", None),  # numeric: copy from first parent
+        ("cluster_ContamPct.tsv", "ContamPct", None),  # numeric: copy from first parent
+    ]
+    for filename, value_col, _ in aux_specs:
+        path = os.path.join(ks_folder, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, sep="\t")
+        except Exception as exc:
+            tqdm.write(f"SLAy _sync_auxiliary_cluster_tsvs: failed to read {path}: {exc!r}")
+            continue
+        if "cluster_id" not in df.columns or value_col not in df.columns:
+            continue
+        existing_ids = set(df["cluster_id"].tolist())
+        new_rows = []
+        for new_id_str, old_ids in merges.items():
+            new_id = int(new_id_str)
+            if new_id in existing_ids:
+                continue
+            if value_col == "KSLabel":
+                try:
+                    label_val = cl_labels.loc[new_id, "label"]
+                except Exception:
+                    label_val = ""
+                new_rows.append({"cluster_id": new_id, value_col: label_val})
+            else:
+                # numeric metric: copy from first parent old_id whose value we can find
+                parent_val = float("nan")
+                for old in old_ids:
+                    try:
+                        old_int = int(old)
+                    except Exception:
+                        continue
+                    match = df.loc[df["cluster_id"] == old_int, value_col]
+                    if len(match) > 0:
+                        parent_val = float(match.iloc[0])
+                        break
+                new_rows.append({"cluster_id": new_id, value_col: parent_val})
+        if not new_rows:
+            continue
+        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        df = df.sort_values("cluster_id").reset_index(drop=True)
+        df.to_csv(path, sep="\t", index=False)
+        tqdm.write(
+            f"SLAy _sync_auxiliary_cluster_tsvs: added {len(new_rows)} stub rows to {filename}"
+        )
+
 
 def accept_merge(
     cl_labels,
@@ -648,7 +726,21 @@ def remove_duplicate_spikes(
         duplicate_idxs = np.where(np.isin(spike_times, duplicate_times))[0]
         duplicate_idxs = np.intersect1d(cluster_idxs, duplicate_idxs)
 
-        assert len(duplicate_idxs) == len(duplicate_times)
+        # duplicate_times is sorted-unique (from np.intersect1d). duplicate_idxs
+        # is the multiset of spike-table rows matching those values within this
+        # cluster: if the same sample index appears in spike_times more than
+        # once for this cluster (real in large wells with template overlap,
+        # or KS double-counting a tied alignment), one unique duplicate time
+        # legitimately maps to >1 spike rows that we want to delete. The old
+        # strict-equality assertion fired on every such case (>720-unit M06804
+        # wells reliably trip it). Only the < direction is a real inconsistency:
+        # a unique duplicate time we cannot locate in the spike table.
+        assert len(duplicate_idxs) >= len(duplicate_times), (
+            f"remove_duplicate_spikes: missing spike-table rows for duplicate "
+            f"times in cluster {old_id} "
+            f"(found {len(duplicate_idxs)} rows for "
+            f"{len(duplicate_times)} unique duplicate times)"
+        )
         # for each duplicate spike, remove associated spikes from KS files
         spike_times = np.delete(spike_times, duplicate_idxs)
         spike_clusters = np.delete(spike_clusters, duplicate_idxs)
